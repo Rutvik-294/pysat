@@ -50,11 +50,18 @@ class App:
         """Compute the trace for current formula and mode."""
         if self.mode == 0:
             self.steps = CDCLTracer(self.clauses, self.num_vars).run()
+            self.tree_root = None
         else:
             self.steps = DPLLTracer(self.clauses, self.num_vars).run()
+            from .tree import build_tree
+            self.tree_root = build_tree(self.steps)
         self.pos = 0
         self.playing = False
         self.last_frame = None
+
+    def _tree_lines_cache(self):
+        from .tree import render_tree
+        return render_tree(self.tree_root, self.pos)
 
     # ------------------------------------------------------------------
     def draw(self):
@@ -106,7 +113,14 @@ class App:
 
         # ---- left: clauses ----
         left_w = max(24, W * 2 // 5)
-        self._panel(3, 0, H - 5, left_w, "Clauses")
+        # reserve bottom rows of the left column for the DPLL tree
+        tree_rows = 0
+        if self.mode == 1 and self.tree_root is not None:
+            from .tree import render_tree
+            tlines = render_tree(self.tree_root, self.pos)
+            tree_rows = min(len(tlines), max(4, (H - 6) // 3))
+        clause_bottom = H - 2 - (tree_rows + 1 if tree_rows else 0)
+        self._panel(3, 0, clause_bottom - 3, left_w, "Clauses")
         hi = set(step.highlight)
         assign = step.assign
         row = 4
@@ -114,7 +128,7 @@ class App:
         all_cls = self._display_clauses(step)
         shown = 0
         for idx, c in enumerate(all_cls):
-            if row >= H - 2 or shown >= H - 5:
+            if row >= clause_bottom or shown >= clause_bottom - 5:
                 break
             if idx < self.scrolloff:
                 continue
@@ -152,6 +166,35 @@ class App:
             shown += 1
         if not all_cls:
             s.addnstr(4, 2, "∅ all satisfied", left_w - 3)
+
+        # ---- left-bottom: DPLL search tree ----
+        if self.mode == 1 and tree_rows:
+            self._panel(H - 2 - tree_rows, 0, tree_rows + 1, left_w,
+                        "Search tree")
+            trow = H - 1 - tree_rows
+            for txt, pair in tlines:
+                if trow >= H - 2:
+                    break
+                if txt == "root":
+                    continue
+                if pair == "failed":
+                    s.attron(curses.color_pair(curses.COLOR_RED) |
+                             curses.A_BOLD)
+                elif pair == "ok":
+                    s.attron(curses.color_pair(curses.COLOR_GREEN) |
+                             curses.A_BOLD)
+                elif pair == "open":
+                    s.attron(curses.color_pair(curses.COLOR_CYAN))
+                s.addnstr(trow, 2, txt[:left_w - 3], left_w - 3)
+                if pair == "failed":
+                    s.attroff(curses.color_pair(curses.COLOR_RED) |
+                              curses.A_BOLD)
+                elif pair == "ok":
+                    s.attroff(curses.color_pair(curses.COLOR_GREEN) |
+                              curses.A_BOLD)
+                elif pair == "open":
+                    s.attroff(curses.color_pair(curses.COLOR_CYAN))
+                trow += 1
 
         # ---- right: assignment / trail / learned ----
         x2 = left_w + 1
