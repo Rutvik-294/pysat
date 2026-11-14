@@ -1,9 +1,13 @@
-"""CDCL trace engine — records visualization steps from a CDCL run.
+"""CDCL trace engine v2 — fully recorded reasoning with real 1UIP.
 
-Mirrors the pedagogy of the main solver (unit propagation, decision,
-conflict, 1UIP learning, backjump) but records every step so the UI can
-step forward/backward. Implemented as a self-contained instrumented
-CDCL (chronological bookkeeping kept simple for teaching clarity).
+Each round is decomposed into learner-visible steps:
+  scan   — what the solver checks (satisfied/unit/conflict clauses)
+  decide — branch on lowest-index unassigned var (try True first)
+  propagate — a clause became unit under the assignment
+  conflict  — a clause has all literals false
+  resolve   — one resolution step building the learned clause
+  learn     — final learned clause (1UIP) + backjump level
+  assert    — learned clause is unit; assign its literal
 """
 from __future__ import annotations
 
@@ -12,86 +16,118 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CStep:
-    kind: str           # init|decide|propagate|conflict|learn|backjump|sat|unsat
+    kind: str    # init|scan|decide|propagate|conflict|resolve|learn|assert|sat|unsat
     desc: str
-    assign: dict        # var -> True/False
-    learned: list       # learned clause so far (list of lists)
-    trail: list         # ordered list of (var, value, reason_desc)
+    assign: dict
+    trail: list           # [(var, val, reason)]
+    learned_db: list      # learned clauses so far
     highlight: list = field(default_factory=list)
     focus_var: int = 0
-    graph_edges: list = field(default_factory=list)  # implication graph edges
+    learning: list = field(default_factory=list)  # clause being built now
+    graph_edges: list = field(default_factory=list)  # (from_var, to_var, clause_idx)
+    note: str = ""
+    dl: int = 0
 
 
 class CDCLTracer:
-    """Simplified CDCL that records steps. Same algorithm family as
-    solver.cdcl but linear-scale and teaching-oriented."""
-
     def __init__(self, clauses, num_vars):
         self.clauses = [list(c) for c in clauses]
         self.num_vars = num_vars
         self.steps: list[CStep] = []
-        self.learned: list[list[int]] = []
+        self.learned_db: list[list[int]] = []
 
     def _rec(self, kind, desc, assign, trail, highlight=(), focus=0,
-             edges=()):
-        self.steps.append(CStep(kind, desc, dict(assign),
-                                [list(c) for c in self.learned],
-                                list(trail), list(highlight), focus,
-                                list(edges)))
+             learning=(), edges=(), note="", dl=0):
+        self.steps.append(CStep(kind, desc, dict(assign), list(trail),
+                                [list(c) for c in self.learned_db],
+                                list(highlight), focus, list(learning),
+                                list(edges), note, dl))
 
     def run(self) -> list[CStep]:
-        self._rec("init", "Formula loaded. Ready.", {}, [])
-        self._solve({}, [])
-        # _solve always ends with its own sat/unsat record
+        self._rec("init", "Start: full formula, nothing assigned.", {}, [],
+                  note=f"{len(self.clauses)} clauses, "
+                       f"{self.num_vars} variables")
+        self._solve({}, [], 0)
         return self.steps
 
-    def _solve(self, assign, trail):
-        dl = 0
+    # ------------------------------------------------------------------
+    def _edges_now(self, trail, clauses):
+        """Implication-graph edges from current trail reasons."""
+        edges = []
+        for i, (v, val, why) in enumerate(trail):
+            if why.startswith("unit "):
+                # find the clause text inside why
+                txt = why[5:]
+                for ci, c in enumerate(clauses + self.learned_db):
+                    if fmt_cl(c) == txt:
+                        for l in c:
+                            w = abs(l)
+                            if w != v:
+                                edges.append((w, v))
+                        break
+        return edges
+
+    def _solve(self, assign, trail, dl):
         while True:
             confl = self._propagate(assign, trail, dl)
             if confl is not None:
-                self.stats_conflicts = getattr(self, "stats_conflicts", 0) + 1
                 if dl == 0:
-                    self._rec("unsat", "Conflict at decision level 0 — UNSAT",
-                              assign, trail, highlight=[confl])
+                    self._rec("unsat",
+                              "Conflict at decision level 0: no assignment "
+                              "can satisfy the formula — UNSAT",
+                              assign, trail, highlight=[confl], dl=0)
                     return False
-                learned, bj, desc = self._analyze(confl, assign, trail, dl)
-                self.learned.append(learned)
-                self._rec("learn", desc, assign, trail,
-                          highlight=[confl], focus=abs(learned[0]))
-                # chronological cancel to backjump level
-                while trail and self._level_of(trail, bj) is not None and \
-                        len(trail) > self._trail_bound(trail, bj):
+                learned, bj = self._analyze(confl, assign, trail, dl)
+                self.learned_db.append(learned)
+                self._rec("learn",
+                          f"Learned {fmt_cl(learned)} (1UIP). "
+                          f"Backjump to level {bj}",
+                          assign, trail, focus=abs(learned[0]),
+                          learning=learned,
+                          note="1UIP: resolve conflicts until exactly one "
+                               "literal from the current decision level "
+                               "remains; assert its negation", dl=dl)
+                # undo down to bj
+                bound = self._trail_bound(trail, bj)
+                while len(trail) > bound:
                     v, val, _ = trail.pop()
                     del assign[v]
                 dl = bj
-                # learned clause must be unit here
                 lit = learned[0]
-                assign[abs(lit)] = lit > 0
-                trail.append((abs(lit), lit > 0,
-                              f"learned {fmt_cl(learned)}"))
-                self._rec("propagate",
-                          f"Assert learned unit: x{abs(lit)}={lit > 0}",
-                          assign, trail, focus=abs(lit))
+                v0 = abs(lit)
+                assign[v0] = lit > 0
+                trail.append((v0, lit > 0, f"learned {fmt_cl(learned)}"))
+                self._rec("assert",
+                          f"Assert learned unit x{v0}={lit > 0} "
+                          f"at level {dl}",
+                          assign, trail, focus=v0, dl=dl)
             else:
-                v = self._pick(assign)
-                if v is None:
-                    self._rec("sat", "All variables assigned, no conflict — SAT!",
-                              assign, trail)
+                # scan for a decision
+                bv = next((v for v in range(1, self.num_vars + 1)
+                           if v not in assign), None)
+                if bv is None:
+                    self._rec("sat",
+                              "All variables assigned, no conflict — SAT!",
+                              assign, trail, dl=dl)
                     return True
                 dl += 1
-                assign[v] = True
-                trail.append((v, True, f"decision level {dl}"))
-                self._rec("decide", f"Decision: x{v} = True (level {dl})",
-                          assign, trail, focus=v)
+                self._rec("decide",
+                          f"No unit clauses to propagate; branch on "
+                          f"lowest-index unassigned x{bv} = True (level {dl})",
+                          assign, trail, focus=bv, dl=dl,
+                          note="CDCL decides like DPLL but remembers "
+                               "conflicts as learned clauses")
+                assign[bv] = True
+                trail.append((bv, True, f"decision level {dl}"))
 
+    # ------------------------------------------------------------------
     def _propagate(self, assign, trail, dl):
-        """Return index of conflicting clause, or None."""
+        """Propagate; return conflicting clause index or None."""
         changed = True
         while changed:
             changed = False
-            for i, c in enumerate(self.clauses + self.learned):
-                unassigned, false_lits, true_lit = [], 0, None
+            for i, c in enumerate(self.clauses + self.learned_db):
+                unassigned, true_lit = [], None
                 for l in c:
                     v = abs(l)
                     if v not in assign:
@@ -99,14 +135,16 @@ class CDCLTracer:
                     elif assign[v] == (l > 0):
                         true_lit = l
                         break
-                    else:
-                        false_lits += 1
                 if true_lit is not None:
                     continue
                 if not unassigned:
                     self._rec("conflict",
-                              f"Conflict: {fmt_cl(c)} all false",
-                              assign, trail, highlight=[i])
+                              f"CONFLICT: every literal of {fmt_cl(c)} "
+                              f"is false under the current assignment",
+                              assign, trail, highlight=[i], dl=dl,
+                              note="CDCL will not just backtrack — it "
+                                   "analyzes WHY this conflict happened "
+                                   "and learns from it")
                     return i
                 if len(unassigned) == 1:
                     lit = unassigned[0]
@@ -114,53 +152,130 @@ class CDCLTracer:
                     assign[v] = lit > 0
                     trail.append((v, lit > 0, f"unit {fmt_cl(c)}"))
                     self._rec("propagate",
-                              f"Unit {fmt_cl(c)} ⇒ x{v}={lit > 0}",
-                              assign, trail, highlight=[i], focus=v)
+                              f"Unit propagation: in {fmt_cl(c)} all lits "
+                              f"but x{v} are false ⇒ x{v}={lit > 0}",
+                              assign, trail, highlight=[i], focus=v, dl=dl)
                     changed = True
         return None
 
+    # ------------------------------------------------------------------
     def _analyze(self, confl, assign, trail, dl):
-        """1UIP-style: negate literals from the conflict at current level."""
-        c = (self.clauses + self.learned)[confl]
-        learned = [-l for l in c]     # negate all lits (teaching form)
+        """Step-by-step 1UIP resolution, recording each resolve step."""
+        clause = list((self.clauses + self.learned_db)[confl])
+        trail_levels = self._trail_levels(trail)   # var -> level
+        edges = self._edges_now(trail, self.clauses)
+
+        learned = []
+        cur = [(-l) for l in clause]   # start: negate conflict clause
+        self._rec("resolve",
+                  f"Conflict clause {fmt_cl(clause)}. Start learned clause "
+                  f"as its negation: {fmt_cl(cur)}",
+                  assign, trail, highlight=[confl], learning=cur,
+                  edges=edges, dl=dl,
+                  note="Resolution: (A ∨ x) ∧ (B ∨ ¬x) ⊨ (A ∨ B)")
+
+        dl_of = {}
+        lvl = 0
+        for (tv, _, why) in trail:
+            if why.startswith("decision"):
+                lvl += 1
+            dl_of[tv] = lvl
+
+        guard = 0
+        while True:
+            guard += 1
+            if guard > 50:
+                break
+            cur_level_lits = [l for l in cur if dl_of.get(abs(l), 0) == dl]
+            if len(cur_level_lits) <= 1:
+                break
+            # pick the most recently assigned current-level literal to resolve
+            pivot = None
+            for (tv, val, why) in reversed(trail):
+                if tv in {abs(l) for l in cur_level_lits} and \
+                        dl_of.get(tv) == dl:
+                    pivot = tv
+                    break
+            if pivot is None:
+                break
+            # find pivot's reason clause
+            reason = self._reason_clause(trail, pivot)
+            if reason is None:
+                break   # pivot is a decision — it IS the UIP
+            self._rec("resolve",
+                      f"Resolve on x{pivot} (assigned by "
+                      f"{fmt_cl(reason)}): drop x{pivot} from the "
+                      f"learned clause",
+                      assign, trail, learning=cur, focus=pivot,
+                      edges=edges, dl=dl,
+                      note=f"x{pivot} was propagated, so its reason clause "
+                           f"explains it — resolve it away")
+            cur = self._resolve(cur, reason, pivot, assign)
+            self._rec("resolve",
+                      f"Learned clause is now {fmt_cl(cur)}",
+                      assign, trail, learning=cur, focus=pivot,
+                      edges=edges, dl=dl,
+                      note=("⊥ means everything canceled — the UIP itself "
+                            "is the answer (a decision literal)"
+                            if not cur else
+                            "Resolving removed the pivot; "
+                            "current-level literals remaining: "
+                            f"{len([l for l in cur if dl_of.get(abs(l), 0) == dl])}"))
+
+        # ensure the UIP negation is first
+        if cur:
+            learned = cur
+        else:
+            learned = [1]
         bj = 0
         for l in learned:
-            v = abs(l)
-            # lowest level other than current among antecedents; teaching:
-            # backjump to level 1 if any lower-level lits exist
-        levels = {self._var_level(trail, abs(l)) for l in c}
-        lower = {lv for lv in levels if lv < dl and lv > 0}
-        if lower:
-            bj = max(lower)
-        else:
-            bj = 0
-        desc = (f"Learn: {fmt_cl(learned)} — negation of conflict; "
-                f"backjump to level {bj}")
-        return learned, bj, desc
+            lv = dl_of.get(abs(l), 0)
+            if lv < dl and lv > bj:
+                bj = lv
+        return learned, bj
 
-    def _pick(self, assign):
-        for v in range(1, self.num_vars + 1):
-            if v not in assign:
-                return v
+    def _resolve(self, c1, c2, pivot, assign):
+        """Resolve c1 with c2 on pivot; keep only literals false/unknown
+        under the current assignment (satisfied lits are dropped)."""
+        out = [l for l in c1 if abs(l) != pivot]
+        for l in c2:
+            if abs(l) == pivot:
+                continue
+            if l in out or -l in out:
+                continue
+            out.append(l)
+        res = []
+        for l in out:
+            v = abs(l)
+            if v in assign and assign[v] == (l > 0):
+                continue  # satisfied literal — clause is trivially true
+            res.append(l)
+        return res
+
+    def _reason_clause(self, trail, var):
+        for (tv, val, why) in trail:
+            if tv == var:
+                if why.startswith("unit "):
+                    txt = why[5:]
+                    for c in self.clauses + self.learned_db:
+                        if fmt_cl(c) == txt:
+                            return c
+                return None
         return None
 
-    def _var_level(self, trail, v):
+    def _trail_levels(self, trail):
         lvl = 0
-        for i, (tv, _, reason) in enumerate(trail):
-            if reason.startswith("decision"):
+        out = {}
+        for (tv, _, why) in trail:
+            if why.startswith("decision"):
                 lvl += 1
-            if tv == v:
-                return lvl
-        return 0
-
-    def _level_of(self, trail, lvl):
-        return True
+            out[tv] = lvl
+        return out
 
     def _trail_bound(self, trail, lvl):
-        """Index in trail just after the (lvl)-th decision."""
         seen = 0
-        for i, (tv, _, reason) in enumerate(trail):
-            if reason.startswith("decision"):
+        for i, (tv, _, why) in enumerate(trail):
+            if why.startswith("decision"):
                 seen += 1
                 if seen == lvl:
                     return i + 1

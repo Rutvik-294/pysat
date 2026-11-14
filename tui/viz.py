@@ -13,7 +13,7 @@ from __future__ import annotations
 import curses
 import time
 
-from .dpll_trace import DPLLTracer, fmt_cnf
+from .dpll_trace import DPLLTracer, fmt_cl as dpll_fmt_cl
 from .cdcl_trace import CDCLTracer, fmt_cl
 
 PRESETS = {
@@ -80,6 +80,8 @@ class App:
             "conflict": curses.COLOR_RED, "learn": curses.COLOR_BLUE,
             "backtrack": curses.COLOR_RED, "backjump": curses.COLOR_BLUE,
             "sat": curses.COLOR_GREEN, "unsat": curses.COLOR_RED,
+            "scan": curses.COLOR_CYAN, "resolve": curses.COLOR_MAGENTA,
+            "assert": curses.COLOR_BLUE,
         }
         color = kind_colors.get(step.kind, curses.COLOR_WHITE)
         s.attron(curses.color_pair(1) | curses.A_BOLD)
@@ -92,12 +94,22 @@ class App:
         except curses.error:
             pass
 
+        # ---- note line (why the algorithm does this) ----
+        note = getattr(step, "note", "") or ""
+        if note:
+            try:
+                s.attron(curses.color_pair(6))  # magenta
+                s.addnstr(2, 2, f"ℹ {note}", W - 3)
+                s.attroff(curses.color_pair(6))
+            except curses.error:
+                pass
+
         # ---- left: clauses ----
         left_w = max(24, W * 2 // 5)
-        self._panel(2, 0, H - 4, left_w, "Clauses")
+        self._panel(3, 0, H - 5, left_w, "Clauses")
         hi = set(step.highlight)
         assign = step.assign
-        row = 3
+        row = 4
         maxlen = left_w - 4
         all_cls = self._display_clauses(step)
         shown = 0
@@ -139,13 +151,13 @@ class App:
             row += 1
             shown += 1
         if not all_cls:
-            s.addnstr(3, 2, "∅ all satisfied", left_w - 3)
+            s.addnstr(4, 2, "∅ all satisfied", left_w - 3)
 
         # ---- right: assignment / trail / learned ----
         x2 = left_w + 1
         w2 = W - x2 - 1
-        self._panel(2, x2, (H - 4) // 2, w2, "Assignment")
-        row = 3
+        self._panel(3, x2, (H - 5) // 2, w2, "Assignment")
+        row = 4
         trail_by_var = {tv: why for tv, val, why in getattr(step, "trail", [])}
         for v in range(1, self.num_vars + 1):
             if row >= H // 2:
@@ -178,12 +190,19 @@ class App:
                     s.attroff(curses.A_REVERSE)
             row += 1
 
-        # learned clauses (CDCL)
-        learned = getattr(step, "learned", [])
-        if learned:
+        # learned clauses (CDCL) + clause being built (resolve steps)
+        learned = getattr(step, "learned_db", getattr(step, "learned", []))
+        learning = getattr(step, "learning", [])
+        if learning or learned:
             self._panel(H // 2, x2, (H - 4) - (H // 2) + 1, w2, "Learned")
             row = H // 2 + 1
-            for lc in learned[-((H - 4) - (H // 2) - 2):]:
+            if learning:
+                s.attron(curses.color_pair(curses.COLOR_MAGENTA) | curses.A_BOLD)
+                s.addnstr(row, x2 + 2,
+                          f"building: {fmt_cl(learning)}"[:w2 - 3], w2 - 3)
+                s.attroff(curses.color_pair(curses.COLOR_MAGENTA) | curses.A_BOLD)
+                row += 1
+            for lc in learned[-((H - 4) - (H // 2) - 3):]:
                 if row >= H - 3:
                     break
                 s.attron(curses.color_pair(curses.COLOR_BLUE))
@@ -210,7 +229,8 @@ class App:
     def _display_clauses(self, step):
         if self.mode == 1:
             return step.frame_clauses
-        return self.clauses + getattr(step, "learned", [])
+        return self.clauses + getattr(step, "learned_db",
+                                      getattr(step, "learned", []))
 
     def _panel(self, y, x, h, w, title):
         s = self.stdscr
