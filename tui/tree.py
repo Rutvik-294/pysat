@@ -32,6 +32,9 @@ def build_tree(steps):
             stack.append(node)
         elif s.kind == "backtrack":
             if s.desc.startswith("x") and "led to a conflict" in s.desc:
+                # the True sibling's subtree is exhausted — mark it failed
+                if len(stack) > 1:
+                    stack[-1]["status"] = "failed"
                 # "try xV = False": create the False sibling
                 node = {"var": s.focus_var, "value": False, "children": [],
                         "status": "pending", "step_at": idx, "done_at": None}
@@ -39,11 +42,15 @@ def build_tree(steps):
                 stack = stack[:d + 1]
                 stack.append(node)
             else:
-                # both values exhausted: current node failed, pop it
+                # "both values exhausted" at depth d: the abandoned node is
+                # at stack[d+1]; after popping it, the parent (new top) has
+                # also finished its subtree — mark both failed
+                if len(stack) > d + 1:
+                    stack[d + 1]["status"] = "failed"
+                    stack[d + 1]["done_at"] = idx
+                stack = stack[:d + 1]
                 if len(stack) > 1:
                     stack[-1]["status"] = "failed"
-                    stack[-1]["done_at"] = idx
-                stack = stack[:max(d, 1)]
         elif s.kind == "conflict":
             if len(stack) > 1:
                 stack[-1]["status"] = "failed"
@@ -52,6 +59,11 @@ def build_tree(steps):
             if len(stack) > 1:
                 stack[-1]["status"] = "ok"
                 stack[-1]["done_at"] = idx
+                # SAT propagates up the whole recursion chain
+                for nd in stack[1:]:
+                    if nd["status"] == "pending":
+                        nd["status"] = "ok"
+                        nd["done_at"] = idx
             else:
                 root["status"] = "ok"
                 root["done_at"] = idx

@@ -28,7 +28,12 @@ PRESETS = {
                          [-5, -11], [-8, -11], [-3, -6], [-3, -9], [-3, -12],
                          [-6, -9], [-6, -12], [-9, -12]], 12),
     "Implication":     ([[5], [-5, 4], [-4, 3], [-3, 2], [-2, 1], [-1]], 5),
+    "Branching demo":  ([[1, 2], [-1, 2], [1, -2], [-1, -2]], 2),
+    "Backtrack 3-level": ([[1, 2], [-2, 3], [-3], [1, -3], [2, -1]], 3),
 }
+
+# start on the branching demo so the DPLL tree is visible immediately
+DEFAULT_PRESET = "Branching demo"
 
 MODES = ["CDCL", "DPLL"]
 
@@ -38,7 +43,7 @@ class App:
         self.stdscr = stdscr
         curses.curs_set(0)
         self.mode = 0                      # index into MODES
-        self.clauses, self.num_vars = PRESETS["Implication"]
+        self.clauses, self.num_vars = PRESETS[DEFAULT_PRESET]
         self.editing = False
         self.edit_buf = ""
         self.edit_msg = ""
@@ -111,16 +116,23 @@ class App:
             except curses.error:
                 pass
 
-        # ---- left: clauses ----
+        # ---- left column: clauses (top) + DPLL search tree (bottom) ----
         left_w = max(24, W * 2 // 5)
-        # reserve bottom rows of the left column for the DPLL tree
-        tree_rows = 0
         if self.mode == 1 and self.tree_root is not None:
             from .tree import render_tree
-            tlines = render_tree(self.tree_root, self.pos)
-            tree_rows = min(len(tlines), max(4, (H - 6) // 3))
-        clause_bottom = H - 2 - (tree_rows + 1 if tree_rows else 0)
-        self._panel(3, 0, clause_bottom - 3, left_w, "Clauses")
+            tlines = [t for t in render_tree(self.tree_root, self.pos)
+                      if t[0] != "root"]
+            # fixed split: bottom 40% of the panel area for the tree
+            area_h = H - 5                     # rows 4..H-3 usable
+            tree_rows = max(4, min(area_h * 2 // 5, len(tlines) + 1))
+            tree_top = H - 2 - tree_rows
+            clause_bottom = tree_top
+        else:
+            tlines = []
+            tree_rows = 0
+            tree_top = H - 2
+            clause_bottom = H - 2
+        self._panel(3, 0, clause_bottom - 4, left_w, "Clauses")
         hi = set(step.highlight)
         assign = step.assign
         row = 4
@@ -128,7 +140,7 @@ class App:
         all_cls = self._display_clauses(step)
         shown = 0
         for idx, c in enumerate(all_cls):
-            if row >= clause_bottom or shown >= clause_bottom - 5:
+            if row >= clause_bottom - 1:
                 break
             if idx < self.scrolloff:
                 continue
@@ -169,14 +181,17 @@ class App:
 
         # ---- left-bottom: DPLL search tree ----
         if self.mode == 1 and tree_rows:
-            self._panel(H - 2 - tree_rows, 0, tree_rows + 1, left_w,
-                        "Search tree")
-            trow = H - 1 - tree_rows
-            for txt, pair in tlines:
+            self._panel(tree_top, 0, tree_rows + 2, left_w, "Search tree")
+            trow = tree_top + 1
+            if not tlines:
+                s.attron(curses.color_pair(curses.COLOR_CYAN))
+                s.addnstr(trow, 2, "branching hasn't started yet…"
+                          [:left_w - 3], left_w - 3)
+                s.attroff(curses.color_pair(curses.COLOR_CYAN))
+                trow += 1
+            for txt, pair in tlines[-(tree_rows - 1):]:
                 if trow >= H - 2:
                     break
-                if txt == "root":
-                    continue
                 if pair == "failed":
                     s.attron(curses.color_pair(curses.COLOR_RED) |
                              curses.A_BOLD)
