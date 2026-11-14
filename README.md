@@ -2,7 +2,8 @@
 
 A conflict-driven clause-learning (CDCL) Boolean satisfiability solver
 implementing the core architecture of modern solvers (MiniSat lineage)
-in ~600 lines of dependency-free Python.
+in ~600 lines of dependency-free Python — **plus an interactive terminal
+visualizer that animates both CDCL and textbook DPLL step by step**.
 
 ```
         _..._
@@ -10,6 +11,32 @@ in ~600 lines of dependency-free Python.
      /  _   _  \     12,000 clauses · 729 vars
     |  (o) (o)  |    → solved in 0.7 s
 ```
+
+## The visualizer
+
+```bash
+python3 visualize.py
+```
+
+An interactive terminal app (pure curses, no installs) for learning how
+DPLL and CDCL actually work:
+
+- **Two modes** — `1` for textbook DPLL (unit propagation, pure-literal
+  elimination, chronological backtracking), `2` for CDCL (decisions,
+  watched propagation, conflict, clause learning, backjumping)
+- **Step-by-step controls** — `←`/`→` walk backward/forward through the
+  algorithm, `space` auto-plays, `r` resets to the start
+- **Editable formulas** — press `e` and type your own clauses
+  (DIMACS-style: `1 2 0 -1 3 0`), up to 12 variables
+- **Live panels** — clause list with ✓/✗ satisfaction marks under the
+  current assignment (conflicts flash red), variable assignment panel
+  color-coded by *why* each value was set (decision / unit / learned),
+  and a "Learned" panel showing the clause database growing as CDCL runs
+- **Built-in presets** — including pigeonhole instances (the classic
+  exponential UNSAT family) and implication chains
+
+Every step records the full state, so you can rewind to any point and
+replay — the app is a time-travel debugger for SAT algorithms.
 
 ## What's inside
 
@@ -21,6 +48,7 @@ in ~600 lines of dependency-free Python.
 | Restarts | Luby sequence |
 | Clause DB | LBD-based learned-clause reduction |
 | Encoders | at-least-one, pairwise AMO, Sinz sequential counters, Tseitin gates |
+| Visualizer | `tui/` — curses app animating DPLL & CDCL step-by-step |
 
 `Solver.solve()` returns a complete model (`{var: bool}`) on SAT, `None`
 on UNSAT. Every SAT answer is verified against all clauses before return.
